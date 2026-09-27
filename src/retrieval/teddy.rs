@@ -1040,25 +1040,16 @@ mod tests {
 
     #[test]
     fn fold_preserves_prefilter_semantics() {
-        // Интеграция: буквальный регистронезависимый поиск по фолду
-        // находит вхождения любого регистра (семантика прежнего пути).
-        let pats: Vec<String> = ["нокс", "соболь"].iter().map(|s| s.to_string()).collect();
-        let q = || pats.clone();
-        let pre = || crate::streaming::literal_prefilter(&pats).unwrap();
-        assert!(crate::streaming::literal_present(
-            "Здесь Нокс действует",
-            &q(),
-            &Some(pre())
-        ));
-        assert!(crate::streaming::literal_present(
-            "НОКС! Соболь и нокс",
-            &q(),
-            &Some(pre())
-        ));
-        assert!(!crate::streaming::literal_present(
-            "здесь лисица",
-            &q(),
-            &Some(pre())
-        ));
+        let pats = ["нокс".as_bytes(), "соболь".as_bytes()];
+        let teddy = Teddy::build(&pats).unwrap();
+
+        let text1 = fold_ascii_cyrillic("Здесь Нокс действует".as_bytes()).unwrap();
+        assert!(teddy.find(&text1).is_some());
+
+        let text2 = fold_ascii_cyrillic("НОКС! Соболь и нокс".as_bytes()).unwrap();
+        assert!(teddy.find(&text2).is_some());
+
+        let text3 = fold_ascii_cyrillic("здесь лисица".as_bytes()).unwrap();
+        assert!(teddy.find(&text3).is_none());
     }
 }

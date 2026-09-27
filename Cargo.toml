@@ -29,6 +29,9 @@ blake3 = "1.5"
 zip = { version = "2.2", default-features = false, features = ["deflate", "aes-crypto", "zstd"] }
 tar = "0.4"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 lto = "thin"
 strip = "symbols"

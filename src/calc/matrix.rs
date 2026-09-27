@@ -839,8 +839,7 @@ mod tests {
         .unwrap();
         let c = m4.charpoly().unwrap();
         let n = 4;
-        let mut pa = Matrix::zeros(n, n); // p(A) = 0·Aⁿ + c1·Aⁿ⁻¹ + … (старший при Aⁿ — c0=1)
-        let mut ak = Matrix::identity(n);
+        let mut pa = Matrix::zeros(n, n);
         // идём от старшей степени вниз: c0·A⁴? нет: c[0]·A^4 + c[1]·A^3 + ... + c[4]·I
         for (k, coef) in c.iter().enumerate() {
             let power = n - k;
@@ -849,7 +848,6 @@ mod tests {
                 term = term.mul(&m4).unwrap();
             }
             pa = pa.add(&term.scale_c(*coef)).unwrap();
-            let _ = ak;
         }
         for v in pa.data.iter() {
             assert!(v.abs() < 1e-9, "Кэли–Гамильтон нарушен: {v}");
