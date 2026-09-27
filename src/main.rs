@@ -1,12 +1,15 @@
-//! POLER-SH — Суверенная командная оболочка и терминальный шлюз (Terminal Gateway).
+//! POLER-SH — Суверенная командная оболочка, терминальный шлюз (Terminal Gateway)
+//! и Native Retrieval (grep/scan по файлам и архивам без распаковки).
 //!
 //! Интегрирует:
 //! 1. Нативный «Калькулятор Всего» (`calc::CalcState`): AST-парсер, диффуравнения `solve`,
 //!    матрицы, комплексные числа, физические единицы (`units`), астрономию и константы.
-//! 2. Аппаратный аудит (`calc::hardware::probe`).
-//! 3. Среду ИИ-агентов (`shell::agentenv`): `sysinfo`, маскирование секретов, `json_envelope`.
-//! 4. Windows-совместимый словарь (`shell::wincompat`).
-//! 5. Прямой запуск процессов без форков bash.
+//! 2. Native Retrieval (`retrieval::grep`): замена grep/ripgrep со сканированием
+//!    внутри .zip, .tar.gz, .tar.zst, .poler без распаковки на диск.
+//! 3. Аппаратный аудит (`calc::hardware::probe`).
+//! 4. Среду ИИ-агентов (`shell::agentenv`): `sysinfo`, маскирование секретов, `json_envelope`.
+//! 5. Windows-совместимый словарь (`shell::wincompat`).
+//! 6. Прямой запуск процессов без форков bash.
 
 use std::env;
 use std::fs;
@@ -16,6 +19,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use poler_sh::calc::{self, CalcState};
+use poler_sh::retrieval::grep::{self, GrepConfig, GrepMode, GrepOutput};
 use poler_sh::shell::{agentenv, wincompat};
 
 fn main() {
@@ -32,7 +36,12 @@ fn main() {
     }
 
     if args[0] == "--version" || args[0] == "-V" {
-        println!("poler-sh 0.1.0 (Terminal Gateway Standalone)");
+        println!("poler-sh 0.2.0 (Terminal Gateway & Native Retrieval)");
+        return;
+    }
+
+    if args[0] == "grep" || args[0] == "scan" {
+        run_cli_grep(&args[1..]);
         return;
     }
 
@@ -56,15 +65,18 @@ fn main() {
 
 fn print_help() {
     println!("\
-poler-sh 0.1.0 — суверенная командная оболочка и терминальный шлюз (Terminal Gateway)
+poler-sh 0.2.0 — суверенная командная оболочка, терминальный шлюз и Native Retrieval
 
 ИСПОЛЬЗОВАНИЕ:
   poler-sh                     запуск интерактивного REPL
+  poler-sh grep <pattern> [path]   мгновенный поиск (замена grep/ripgrep)
   poler-sh --exec \"<команда>\"    выполнить команду и выйти
   poler-sh --exec \"<команда>\" --json   машиночитаемый JSON-конверт для ИИ-агентов
   poler-sh -c \"<команда>\"       совместимость с posix sh/bash
 
 ВСТРОЕННЫЕ КОМАНДЫ (мгновенные нативные утилиты 3.3 мс):
+  grep [-i] [-F|-E] [-A N] [-B N] [-c|-l] [--archives] <pat> [paths...]
+                               точный поиск по файлам и архивам без распаковки
   calc <выражение>             нативный AST-калькулятор (2^64-1, sin(pi/4), solve x^2 - 4 = 0)
   = <val> <from> to <to>       конвертер физ. единиц (= 100 km/h to m/s, = 10 GiB to MB)
   hw [--json]                  скрытые аппаратные параметры ПК (CPUID, кеши L1-L3, GPU, RAM)
@@ -78,7 +90,7 @@ poler-sh 0.1.0 — суверенная командная оболочка и �
 }
 
 fn run_repl() {
-    println!("poler-sh 0.1.0 — суверенный терминальный шлюз. `help` — список команд, `quit` — выход.");
+    println!("poler-sh 0.2.0 — суверенный терминальный шлюз. `help` — список команд, `quit` — выход.");
     let history_path = dirs_cache_history();
     let mut calc_state = CalcState::new();
 
@@ -135,10 +147,108 @@ fn run_exec(cmd: &str, calc_state: &mut CalcState, json_mode: bool) {
     }
 }
 
+fn run_cli_grep(args: &[String]) {
+    let (cfg, roots) = parse_grep_args(args);
+    if cfg.pattern.is_empty() {
+        eprintln!("poler-sh grep: укажите поисковый шаблон");
+        std::process::exit(2);
+    }
+    match grep::grep_run(&roots, &cfg) {
+        Ok(report) => {
+            let is_tty = grep::stdout_is_tty();
+            let text = grep::render_text(&report, is_tty);
+            if !text.is_empty() {
+                print!("{text}");
+            }
+            std::process::exit(if report.any_match() { 0 } else { 1 });
+        }
+        Err(e) => {
+            eprintln!("poler-sh grep: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_grep_args(args: &[String]) -> (GrepConfig, Vec<PathBuf>) {
+    let mut cfg = GrepConfig::default();
+    let mut roots = Vec::new();
+    let mut i = 0;
+    let mut pattern_set = false;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-i" || arg == "--ignore-case" {
+            cfg.case_insensitive = true;
+        } else if arg == "-F" || arg == "--fixed-strings" {
+            cfg.mode = GrepMode::Literal;
+        } else if arg == "-E" || arg == "--extended-regexp" {
+            cfg.mode = GrepMode::Regex;
+        } else if arg == "-c" || arg == "--count" {
+            cfg.output = GrepOutput::Count;
+        } else if arg == "-l" || arg == "--files-with-matches" {
+            cfg.output = GrepOutput::ListMatching;
+        } else if arg == "-L" || arg == "--files-without-match" {
+            cfg.output = GrepOutput::ListNonMatching;
+        } else if arg == "--archives" {
+            cfg.scan_archives = true;
+        } else if arg == "--hidden" {
+            cfg.include_hidden = true;
+        } else if (arg == "-A" || arg == "--after-context") && i + 1 < args.len() {
+            i += 1;
+            cfg.after = args[i].parse().unwrap_or(0);
+        } else if (arg == "-B" || arg == "--before-context") && i + 1 < args.len() {
+            i += 1;
+            cfg.before = args[i].parse().unwrap_or(0);
+        } else if (arg == "-C" || arg == "--context") && i + 1 < args.len() {
+            i += 1;
+            let n = args[i].parse().unwrap_or(0);
+            cfg.before = n;
+            cfg.after = n;
+        } else if arg.starts_with('-') {
+            // неизвестный флаг
+        } else if !pattern_set {
+            cfg.pattern = arg.clone();
+            pattern_set = true;
+        } else {
+            roots.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+
+    if roots.is_empty() {
+        roots.push(PathBuf::from("."));
+    }
+    (cfg, roots)
+}
+
 fn execute_command(cmd: &str, calc_state: &mut CalcState) -> (String, bool, i32) {
     let trimmed = cmd.trim();
 
-    // 1. AST Калькулятор: calc <expr> или = <expr>
+    // 1. Native Retrieval: grep <args...>
+    if trimmed.starts_with("grep ") || trimmed == "grep" || trimmed.starts_with("scan ") || trimmed == "scan" {
+        let args_str = if let Some(rest) = trimmed.strip_prefix("grep") {
+            rest.trim()
+        } else if let Some(rest) = trimmed.strip_prefix("scan") {
+            rest.trim()
+        } else {
+            ""
+        };
+        let parts: Vec<String> = args_str.split_whitespace().map(|s| s.to_string()).collect();
+        let (cfg, roots) = parse_grep_args(&parts);
+        if cfg.pattern.is_empty() {
+            return ("grep: укажите поисковый шаблон".into(), false, 2);
+        }
+        return match grep::grep_run(&roots, &cfg) {
+            Ok(report) => {
+                let text = grep::render_text(&report, false);
+                let ok = report.any_match();
+                (text, ok, if ok { 0 } else { 1 })
+            }
+            Err(e) => (format!("grep: {e}"), false, 2),
+        };
+    }
+
+    // 2. AST Калькулятор: calc <expr> или = <expr>
     if trimmed.starts_with("calc ") || trimmed == "calc" || trimmed.starts_with('=') {
         let expr = if let Some(rest) = trimmed.strip_prefix("calc") {
             rest.trim()
@@ -186,12 +296,12 @@ fn execute_command(cmd: &str, calc_state: &mut CalcState) -> (String, bool, i32)
         (cwd, true, 0)
     } else if trimmed == "help" {
         (
-            "Встроенные команды poler-sh:\n  calc <expr>, =<expr>, hw [--json], sysinfo, win, cd, pwd, exit/quit\nWindows и Linux команды транслируются нативно.".into(),
+            "Встроенные команды poler-sh:\n  grep [-i] [-F|-E] [--archives] <pat> [path] (Native Retrieval)\n  calc <expr>, =<expr>, hw [--json], sysinfo, win, cd, pwd, exit/quit\nWindows и Linux команды транслируются нативно.".into(),
             true,
             0,
         )
     } else {
-        // 8. Прямой запуск внешней команды
+        // Прямой запуск внешней команды
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if parts.is_empty() {
             return (String::new(), true, 0);
