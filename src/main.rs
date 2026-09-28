@@ -50,10 +50,15 @@ fn main() {
             eprintln!("poler-sh: требуется команда для --exec");
             std::process::exit(1);
         }
-        let cmd = &args[1];
         let json_mode = args.iter().any(|a| a == "--json");
+        let cmd_parts: Vec<&str> = args[1..]
+            .iter()
+            .filter(|a| *a != "--json")
+            .map(|s| s.as_str())
+            .collect();
+        let cmd = cmd_parts.join(" ");
         let mut calc_state = CalcState::new();
-        run_exec(cmd, &mut calc_state, json_mode);
+        run_exec(&cmd, &mut calc_state, json_mode);
         return;
     }
 
@@ -221,8 +226,78 @@ fn parse_grep_args(args: &[String]) -> (GrepConfig, Vec<PathBuf>) {
     (cfg, roots)
 }
 
+fn split_top_level_sequence<'a>(input: &'a str, delim: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut last = 0;
+    let bytes = input.as_bytes();
+    let dbytes = delim.as_bytes();
+    let dlen = dbytes.len();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            i += 1;
+        } else if b == b'"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            i += 1;
+        } else if !in_single_quote && !in_double_quote && i + dlen <= bytes.len() && &bytes[i..i+dlen] == dbytes {
+            parts.push(&input[last..i]);
+            i += dlen;
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+    if last <= input.len() {
+        parts.push(&input[last..]);
+    }
+    parts
+}
+
 fn execute_command(cmd: &str, calc_state: &mut CalcState) -> (String, bool, i32) {
     let trimmed = cmd.trim();
+
+    // 0. Цепочки команд: && и ; (с учётом кавычек)
+    let and_parts = split_top_level_sequence(trimmed, "&&");
+    if and_parts.len() > 1 {
+        let mut final_output = String::new();
+        for sub_cmd in and_parts {
+            let sub_cmd = sub_cmd.trim();
+            if sub_cmd.is_empty() { continue; }
+            let (out, ok, code) = execute_command(sub_cmd, calc_state);
+            if !final_output.is_empty() && !out.is_empty() {
+                final_output.push('\n');
+            }
+            final_output.push_str(&out);
+            if !ok || code != 0 {
+                return (final_output, false, code);
+            }
+        }
+        return (final_output, true, 0);
+    }
+
+    let semi_parts = split_top_level_sequence(trimmed, ";");
+    if semi_parts.len() > 1 {
+        let mut final_output = String::new();
+        let mut last_code = 0;
+        let mut all_ok = true;
+        for sub_cmd in semi_parts {
+            let sub_cmd = sub_cmd.trim();
+            if sub_cmd.is_empty() { continue; }
+            let (out, ok, code) = execute_command(sub_cmd, calc_state);
+            if !final_output.is_empty() && !out.is_empty() {
+                final_output.push('\n');
+            }
+            final_output.push_str(&out);
+            last_code = code;
+            if !ok { all_ok = false; }
+        }
+        return (final_output, all_ok, last_code);
+    }
 
     // 1. Native Retrieval: grep <args...>
     if trimmed.starts_with("grep ") || trimmed == "grep" || trimmed.starts_with("scan ") || trimmed == "scan" {
@@ -302,12 +377,13 @@ fn execute_command(cmd: &str, calc_state: &mut CalcState) -> (String, bool, i32)
         )
     } else {
         // Прямой запуск внешней команды
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        let parts: Vec<String> = shlex::split(trimmed)
+            .unwrap_or_else(|| trimmed.split_whitespace().map(|s| s.to_string()).collect());
         if parts.is_empty() {
             return (String::new(), true, 0);
         }
 
-        let program = parts[0];
+        let program = &parts[0];
         let args = &parts[1..];
 
         let mut command = Command::new(program);
