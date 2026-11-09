@@ -3623,10 +3623,16 @@ fn cmd_quantum_verify(args: &[String]) -> CmdResult {
 
 // ---------------------------------------------------------------------------
 // v0.46.0: Системный шелл, passthrough и запуск .poler-контейнеров
+// v0.50.0: Causal Nexus AST NOP-аннигиляция и UDS Event Plane
 // ---------------------------------------------------------------------------
+
+pub use crate::causal::check_causal_nexus;
 
 fn run_sh_command(raw_cmd: &str) -> CmdResult {
     let t0 = Instant::now();
+    if let Some((msg, _ok, _code)) = check_causal_nexus(raw_cmd) {
+        return CmdResult::Done(msg);
+    }
     let output = match std::process::Command::new("sh").arg("-c").arg(raw_cmd).output() {
         Ok(o) => o,
         Err(e) => return CmdResult::Done(format!("❌ помилка виклику sh: {e}")),

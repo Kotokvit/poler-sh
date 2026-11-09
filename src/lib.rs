@@ -3,6 +3,7 @@
 
 pub mod archive;
 pub mod calc;
+pub mod causal;
 pub mod pqc;
 pub mod retrieval;
 pub mod shell {

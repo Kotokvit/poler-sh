@@ -299,6 +299,11 @@ fn execute_command(cmd: &str, calc_state: &mut CalcState) -> (String, bool, i32)
         return (final_output, all_ok, last_code);
     }
 
+    // Causal Nexus & Event Plane: проверка инвариантов и коллизий перед fork/exec
+    if let Some((msg, ok, code)) = poler_sh::causal::check_causal_nexus(trimmed) {
+        return (msg, ok, code);
+    }
+
     // 1. Native Retrieval: grep <args...>
     if trimmed.starts_with("grep ") || trimmed == "grep" || trimmed.starts_with("scan ") || trimmed == "scan" {
         let args_str = if let Some(rest) = trimmed.strip_prefix("grep") {
@@ -376,34 +381,54 @@ fn execute_command(cmd: &str, calc_state: &mut CalcState) -> (String, bool, i32)
             0,
         )
     } else {
-        // Прямой запуск внешней команды
-        let parts: Vec<String> = shlex::split(trimmed)
-            .unwrap_or_else(|| trimmed.split_whitespace().map(|s| s.to_string()).collect());
-        if parts.is_empty() {
-            return (String::new(), true, 0);
-        }
-
-        let program = &parts[0];
-        let args = &parts[1..];
-
-        let mut command = Command::new(program);
-        command.args(args);
-
-        match command.output() {
-            Ok(out) => {
-                let stdout_str = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr_str = String::from_utf8_lossy(&out.stderr).to_string();
-                let full = if stderr_str.is_empty() {
-                    stdout_str
-                } else if stdout_str.is_empty() {
-                    stderr_str
-                } else {
-                    format!("{stdout_str}\n{stderr_str}")
-                };
-                let code = out.status.code().unwrap_or(if out.status.success() { 0 } else { 1 });
-                (full.trim_end().to_string(), out.status.success(), code)
+        // Прямой запуск внешней команды (с поддержкой пайпов/редиректов)
+        if trimmed.contains('>') || trimmed.contains('|') || trimmed.contains('<') {
+            let output = Command::new("sh").arg("-c").arg(trimmed).output();
+            match output {
+                Ok(out) => {
+                    let stdout_str = String::from_utf8_lossy(&out.stdout).to_string();
+                    let stderr_str = String::from_utf8_lossy(&out.stderr).to_string();
+                    let full = if stderr_str.is_empty() {
+                        stdout_str
+                    } else if stdout_str.is_empty() {
+                        stderr_str
+                    } else {
+                        format!("{stdout_str}\n{stderr_str}")
+                    };
+                    let code = out.status.code().unwrap_or(if out.status.success() { 0 } else { 1 });
+                    (full.trim_end().to_string(), out.status.success(), code)
+                }
+                Err(e) => (format!("poler-sh: sh: {e}"), false, 127),
             }
-            Err(e) => (format!("poler-sh: {program}: {e}"), false, 127),
+        } else {
+            let parts: Vec<String> = shlex::split(trimmed)
+                .unwrap_or_else(|| trimmed.split_whitespace().map(|s| s.to_string()).collect());
+            if parts.is_empty() {
+                return (String::new(), true, 0);
+            }
+
+            let program = &parts[0];
+            let args = &parts[1..];
+
+            let mut command = Command::new(program);
+            command.args(args);
+
+            match command.output() {
+                Ok(out) => {
+                    let stdout_str = String::from_utf8_lossy(&out.stdout).to_string();
+                    let stderr_str = String::from_utf8_lossy(&out.stderr).to_string();
+                    let full = if stderr_str.is_empty() {
+                        stdout_str
+                    } else if stdout_str.is_empty() {
+                        stderr_str
+                    } else {
+                        format!("{stdout_str}\n{stderr_str}")
+                    };
+                    let code = out.status.code().unwrap_or(if out.status.success() { 0 } else { 1 });
+                    (full.trim_end().to_string(), out.status.success(), code)
+                }
+                Err(e) => (format!("poler-sh: {program}: {e}"), false, 127),
+            }
         }
     }
 }
